@@ -3,12 +3,364 @@
 <head>
     <meta charset="UTF-8">
     <title>Shape Editor Website</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+        }
+
+        svg {
+            border: 1px solid #ccc;
+            background: #fff;
+            margin: 10px;
+            display: block;
+        }
+
+        .cmd rect,
+        .typeBtn rect {
+            stroke: #000;
+            stroke-width: 1;
+        }
+
+        .cmd text,
+        .typeBtn text {
+            pointer-events: none;
+            font-size: 12px;
+        }
+
+        .cmd,
+        .typeBtn {
+            cursor: pointer;
+        }
+    </style>
 </head>
 <body>
-    <svg style="width: 1000px; height: 1000px;"></svg>
-    <script>
 
-      
-    </script>
+<svg id="svgMain" width="900" height="500" xmlns="http://www.w3.org/2000/svg">
+
+    <text id="infoText" x="160" y="40" font-size="14">
+        Click a command on the left.
+    </text>
+
+    <g id="cmdGroup">
+        <g id="cmdCreate" class="cmd">
+            <rect x="40" y="70" width="80" height="25" fill="#7ee887"></rect>
+            <text x="60" y="88">Create</text>
+        </g>
+
+        <g id="cmdDelete" class="cmd">
+            <rect x="40" y="105" width="80" height="25" fill="#f58aa8"></rect>
+            <text x="60" y="123">Delete</text>
+        </g>
+
+        <g id="cmdMove" class="cmd">
+            <rect x="40" y="140" width="80" height="25" fill="#9aaef7"></rect>
+            <text x="60" y="158">Move</text>
+        </g>
+    </g>
+
+    <g id="shapeTypeGroup" visibility="hidden">
+        <g id="btnRect" class="typeBtn">
+            <rect x="160" y="70" width="100" height="30" fill="#dddddd"></rect>
+            <text x="183" y="90">Rectangle</text>
+        </g>
+
+        <g id="btnCircle" class="typeBtn">
+            <rect x="280" y="70" width="100" height="30" fill="#dddddd"></rect>
+            <text x="309" y="90">Circle</text>
+        </g>
+    </g>
+
+    <g id="shapeLayer"></g>
+
+</svg>
+
+<script>
+    const NS = "http://www.w3.org/2000/svg";
+
+    const svgMain = document.getElementById("svgMain");
+    const infoText = document.getElementById("infoText");
+    const shapeLayer = document.getElementById("shapeLayer");
+    const shapeTypeGroup = document.getElementById("shapeTypeGroup");
+
+    const ST_IDLE          = "idle";
+    const ST_MAKE_RECT     = "makeRect";
+    const ST_MAKE_CIRCLE   = "makeCircle";
+    const ST_PICK_MOVE     = "pickMove";
+    const ST_PLACING       = "placing";
+    const ST_PICK_DELETE   = "pickDelete";
+
+    let currentState = ST_IDLE;
+    let nextIdNum = 1;
+
+    const allShapes = [];
+
+    const commands = [];
+    const typeButtons = [];
+
+    function setup() {
+        ["cmdCreate", "cmdDelete", "cmdMove"].forEach(id => {
+            const g = document.getElementById(id);
+            const box = g.getBBox();
+            commands.push({
+                name: id.replace("cmd", "").toLowerCase(),
+                box: box
+            });
+        });
+
+        ["btnRect", "btnCircle"].forEach(id => {
+            const g = document.getElementById(id);
+            const box = g.getBBox();
+            typeButtons.push({
+                kind: id === "btnRect" ? "rect" : "circle",
+                box: box
+            });
+        });
+
+        svgMain.addEventListener("mousedown", handleClick);
+    }
+
+    function setInfo(msg) {
+        infoText.textContent = msg;
+    }
+
+    function showTypeButtons(show) {
+        shapeTypeGroup.setAttribute("visibility", show ? "visible" : "hidden");
+    }
+
+    function svgCoords(evt) {
+        const pt = svgMain.createSVGPoint();
+        pt.x = evt.clientX;
+        pt.y = evt.clientY;
+        const res = pt.matrixTransform(svgMain.getScreenCTM().inverse());
+        return { x: res.x, y: res.y };
+    }
+
+    function insideBox(box, x, y) {
+        return x >= box.x &&
+               x <= box.x + box.width &&
+               y >= box.y &&
+               y <= box.y + box.height;
+    }
+
+    function hitCommand(x, y) {
+        for (let i = 0; i < commands.length; i++) {
+            if (insideBox(commands[i].box, x, y)) {
+                return commands[i].name;
+            }
+        }
+        return null;
+    }
+
+    function hitTypeButton(x, y) {
+        if (shapeTypeGroup.getAttribute("visibility") !== "visible") {
+            return null;
+        }
+        for (let i = 0; i < typeButtons.length; i++) {
+            if (insideBox(typeButtons[i].box, x, y)) {
+                return typeButtons[i].kind;
+            }
+        }
+        return null;
+    }
+
+    function hitShapeIndex(x, y) {
+        for (let i = allShapes.length - 1; i >= 0; i--) {
+            const s = allShapes[i];
+            if (s.type === "rect") {
+                const hw = s.w / 2;
+                const hh = s.h / 2;
+                if (x >= s.cx - hw && x <= s.cx + hw &&
+                    y >= s.cy - hh && y <= s.cy + hh) {
+                    return i;
+                }
+            } else if (s.type === "circle") {
+                const dx = x - s.cx;
+                const dy = y - s.cy;
+                if (dx * dx + dy * dy <= s.r * s.r) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    function blinkShape(idx) {
+        const shape = allShapes[idx];
+        const el = shape.el;
+        const original = shape.fill;
+        let visible = true;
+        let times = 0;
+
+        const timer = setInterval(() => {
+            el.setAttribute("fill", visible ? "transparent" : original);
+            visible = !visible;
+            times++;
+            if (times > 5) {
+                clearInterval(timer);
+                el.setAttribute("fill", original);
+            }
+        }, 120);
+    }
+
+    function makeRect(x, y) {
+        const w = 140;
+        const h = 60;
+        const fill = "#000000";
+
+        const r = document.createElementNS(NS, "rect");
+        r.setAttribute("x", x - w / 2);
+        r.setAttribute("y", y - h / 2);
+        r.setAttribute("width", w);
+        r.setAttribute("height", h);
+        r.setAttribute("fill", fill);
+        const idVal = "id" + nextIdNum++;
+        r.setAttribute("id", idVal);
+
+        shapeLayer.appendChild(r);
+
+        allShapes.push({
+            id: idVal,
+            type: "rect",
+            cx: x,
+            cy: y,
+            w: w,
+            h: h,
+            r: null,
+            fill: fill,
+            el: r
+        });
+    }
+
+    function makeCircle(x, y) {
+        const rad = 35;
+        const fill = "#000000";
+
+        const c = document.createElementNS(NS, "circle");
+        c.setAttribute("cx", x);
+        c.setAttribute("cy", y);
+        c.setAttribute("r", rad);
+        const idVal = "id" + nextIdNum++;
+        c.setAttribute("id", idVal);
+        c.setAttribute("fill", fill);
+
+        shapeLayer.appendChild(c);
+
+        allShapes.push({
+            id: idVal,
+            type: "circle",
+            cx: x,
+            cy: y,
+            w: null,
+            h: null,
+            r: rad,
+            fill: fill,
+            el: c
+        });
+    }
+
+    function moveShape(idx, x, y) {
+        const s = allShapes[idx];
+        s.cx = x;
+        s.cy = y;
+        if (s.type === "rect") {
+            s.el.setAttribute("x", x - s.w / 2);
+            s.el.setAttribute("y", y - s.h / 2);
+        } else {
+            s.el.setAttribute("cx", x);
+            s.el.setAttribute("cy", y);
+        }
+    }
+
+    function removeShape(idx) {
+        const s = allShapes[idx];
+        shapeLayer.removeChild(s.el);
+        allShapes.splice(idx, 1);
+    }
+
+    let selectedIndex = null;
+
+    function handleClick(evt) {
+        const pos = svgCoords(evt);
+        const x = pos.x;
+        const y = pos.y;
+
+        const cmd = hitCommand(x, y);
+        const typeBtn = hitTypeButton(x, y);
+        const shapeIdx = hitShapeIndex(x, y);
+
+        if (cmd === "create") {
+            showTypeButtons(true);
+            setInfo("Pick rectangle or circle.");
+            currentState = ST_IDLE;
+            return;
+        } else if (cmd === "move") {
+            showTypeButtons(false);
+            setInfo("Click a shape to move it.");
+            currentState = ST_PICK_MOVE;
+            return;
+        } else if (cmd === "delete") {
+            showTypeButtons(false);
+            setInfo("Click a shape to delete it.");
+            currentState = ST_PICK_DELETE;
+            return;
+        }
+
+        switch (currentState) {
+            case ST_IDLE:
+                if (typeBtn === "rect") {
+                    showTypeButtons(false);
+                    setInfo("Click on the canvas to place the rectangle.");
+                    currentState = ST_MAKE_RECT;
+                } else if (typeBtn === "circle") {
+                    showTypeButtons(false);
+                    setInfo("Click on the canvas to place the circle.");
+                    currentState = ST_MAKE_CIRCLE;
+                }
+                break;
+
+            case ST_MAKE_RECT:
+                makeRect(x, y);
+                setInfo("Rectangle created. Click another command.");
+                currentState = ST_IDLE;
+                break;
+
+            case ST_MAKE_CIRCLE:
+                makeCircle(x, y);
+                setInfo("Circle created. Click another command.");
+                currentState = ST_IDLE;
+                break;
+
+            case ST_PICK_MOVE:
+                if (shapeIdx !== -1) {
+                    selectedIndex = shapeIdx;
+                    blinkShape(shapeIdx);
+                    setInfo("Now click where you want to move it.");
+                    currentState = ST_PLACING;
+                }
+                break;
+
+            case ST_PLACING:
+                if (selectedIndex !== null) {
+                    moveShape(selectedIndex, x, y);
+                    selectedIndex = null;
+                    setInfo("Shape moved. Click another command.");
+                    currentState = ST_IDLE;
+                }
+                break;
+
+            case ST_PICK_DELETE:
+                if (shapeIdx !== -1) {
+                    removeShape(shapeIdx);
+                    setInfo("Shape deleted. Click another command.");
+                    currentState = ST_IDLE;
+                }
+                break;
+        }
+    }
+
+    setup();
+</script>
+
 </body>
 </html>
